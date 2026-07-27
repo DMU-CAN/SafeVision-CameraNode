@@ -1,0 +1,16 @@
+[Unit]
+Description=SafeVision camera node (RTSP transmitter)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/safevision-camera-node
+EnvironmentFile=/opt/safevision-camera-node/.env
+ExecStart=/usr/bin/python3 /opt/safevision-camera-node/camera_node.py
+Restart=always
+RestartSec=3
+User=pi
+
+[Install]
+WantedBy=multi-user.target
