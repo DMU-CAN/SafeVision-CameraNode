@@ -61,3 +61,41 @@ crashes or the camera is briefly unplugged.
 - For CSI, `ffmpeg` does a stream copy (`-c:v copy`) — no software encoding,
   so resolution/framerate changes take effect on `rpicam-vid`'s side, not
   ffmpeg's.
+# Windows laptop webcam test mode
+
+For local development, set `CAMERA_SOURCE=windows` to capture the laptop
+webcam through FFmpeg DirectShow and publish the same RTSP stream as a real
+camera node.
+
+List available camera names:
+
+```powershell
+ffmpeg -list_devices true -f dshow -i dummy
+```
+
+Example `.env`:
+
+```env
+CAMERA_SOURCE=windows
+CAMERA_DEVICE=Integrated Camera
+RTSP_PORT=8554
+RTSP_PATH=cam
+```
+
+Run with `python camera_node.py`. The stream is available at
+`rtsp://<laptop-ip>:8554/cam`. Use `csi` or `usb` on Raspberry Pi deployments.
+
+# Automatic multi-camera mode
+
+`CAMERA_SOURCE=auto` is the default. The node discovers all available camera
+inputs and assigns one RTSP listener per camera, starting at `RTSP_PORT`:
+
+```text
+camera 1 -> rtsp://<node-ip>:8554/cam
+camera 2 -> rtsp://<node-ip>:8555/cam
+camera 3 -> rtsp://<node-ip>:8556/cam
+```
+
+On Windows, DirectShow devices are discovered automatically. On Linux/Raspberry
+Pi, `/dev/video*` devices are discovered automatically. Set `CAMERA_SOURCE=csi`
+or `CAMERA_SOURCE=usb` only when a single explicit source is required.
