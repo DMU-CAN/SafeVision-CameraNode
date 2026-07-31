@@ -1,8 +1,14 @@
 """SafeVision camera node: captures video from a CSI camera (rpicam-vid) or a
-USB webcam (v4l2) and serves it as an RTSP stream that ffmpeg hosts itself
-(no separate RTSP server binary needed, via `-rtsp_flags listen`).
+USB webcam (v4l2), and publishes it to a local MediaMTX RTSP server, which is
+what actually serves the stream to the main SafeVision backend.
 
-The main SafeVision backend connects directly to this node's RTSP URL
+Earlier versions of this script had ffmpeg host the RTSP server itself via
+`-rtsp_flags listen`. That mode turned out to be unreliable in practice (it
+fails with `Connection refused` on some ffmpeg builds/platforms even for a
+plain synthetic test source, unrelated to the camera) — MediaMTX + ffmpeg
+push is the verified-working replacement.
+
+The main SafeVision backend connects to this node's RTSP URL
 (rtsp://<node-ip>:<port>/<path>) — see SafeVision-Backend's camera
 registration (`POST /api/v1/cameras`).
 
@@ -12,12 +18,17 @@ Configuration is read from environment variables (see .env.example):
     WIDTH, HEIGHT       capture resolution       (default: 1280x720)
     FRAMERATE           capture fps              (default: 30)
     BITRATE             encoder bitrate, USB only (default: 2M)
-    RTSP_PORT           port to listen on        (default: 8554)
+    RTSP_PORT           MediaMTX RTSP port       (default: 8554)
     RTSP_PATH           stream path              (default: cam)
+
+MediaMTX itself needs its binary available — see README.md for where to get
+it. Resolution order: $MEDIAMTX_PATH, ./mediamtx/mediamtx(.exe) next to this
+script, then whatever `mediamtx` resolves to on PATH.
 """
 
 import os
 import re
+import threading
 from glob import glob
 from pathlib import Path
 import shlex
@@ -26,6 +37,7 @@ import sys
 import time
 
 RESTART_BACKOFF_SECONDS = 3
+MEDIAMTX_STARTUP_GRACE_SECONDS = 2
 
 
 def ffmpeg_binary() -> str:
@@ -36,20 +48,65 @@ def ffmpeg_binary() -> str:
         return configured
     # The ARM64 build in bin/ is required by the Windows ARM camera driver.
     # The x64 distribution under ffmpeg/ is kept as an explicit alternative.
-    candidates = (root / "bin" / executable, root / "ffmpeg" / "bin" / executable)
+    candidates = (root / "ffmpeg" / "bin" / executable, root / "bin" / executable)
     for bundled in candidates:
         if bundled.exists():
             return str(bundled)
     return "ffmpeg"
 
 
+def mediamtx_binary() -> str:
+    executable = "mediamtx.exe" if os.name == "nt" else "mediamtx"
+    root = Path(__file__).resolve().parent
+    configured = os.environ.get("MEDIAMTX_PATH")
+    if configured and Path(configured).exists():
+        return configured
+    bundled = root / "mediamtx" / executable
+    if bundled.exists():
+        return str(bundled)
+    return executable
+
+
 def env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def build_command(device: str | None = None, port_offset: int = 0, source_override: str | None = None) -> tuple[list[str] | None, list[str]]:
+def run_mediamtx_forever() -> None:
+    """MediaMTX is the actual RTSP server for this node — it just needs to
+    stay up; ffmpeg (run separately, see run_capture_forever) publishes into
+    it rather than hosting RTSP itself. Runs on its own restart loop, same
+    supervision style as the capture pipeline below."""
+    binary = mediamtx_binary()
+    root = Path(__file__).resolve().parent
+    config = root / "mediamtx.yml"
+    command = [binary] + ([str(config)] if config.exists() else [])
+
+    while True:
+        print(f"[camera-node] mediamtx: {shlex.join(command)}", flush=True)
+        try:
+            process = subprocess.Popen(command, cwd=str(root))
+            process.wait()
+            print(f"[camera-node] mediamtx exited with code {process.returncode}", flush=True)
+        except FileNotFoundError:
+            print(
+                "[camera-node] mediamtx binary not found — see README.md for where to get it "
+                "(or set MEDIAMTX_PATH). Camera capture cannot publish anywhere without it.",
+                file=sys.stderr, flush=True,
+            )
+        print(f"[camera-node] restarting mediamtx in {RESTART_BACKOFF_SECONDS}s", flush=True)
+        time.sleep(RESTART_BACKOFF_SECONDS)
+
+
+def build_command(device: str | None = None, stream_index: int = 0, source_override: str | None = None) -> tuple[list[str] | None, list[str]]:
     """Returns (capture_command_or_None, ffmpeg_command). When capture_command
-    is set, its stdout must be piped into ffmpeg's stdin (used for CSI)."""
+    is set, its stdout must be piped into ffmpeg's stdin (used for CSI). The
+    ffmpeg command always publishes (pushes) to the local MediaMTX instance —
+    it never hosts RTSP itself.
+
+    `stream_index` distinguishes multiple cameras on the same node (see
+    run_auto): MediaMTX serves any number of streams on one shared port, each
+    at its own path, so the second+ camera gets RTSP_PATH suffixed with its
+    1-based index (cam, cam2, cam3, ...) rather than a different port."""
 
     source = (source_override or env("CAMERA_SOURCE", "auto")).lower()
     if source in {"auto", "windows_auto"} and os.name == "nt":
@@ -57,10 +114,13 @@ def build_command(device: str | None = None, port_offset: int = 0, source_overri
     width = env("WIDTH", "1280")
     height = env("HEIGHT", "720")
     framerate = env("FRAMERATE", "30")
-    rtsp_port = str(int(env("RTSP_PORT", "8554")) + port_offset)
+    rtsp_port = env("RTSP_PORT", "8554")
     rtsp_path = env("RTSP_PATH", "cam")
-    rtsp_host = env("RTSP_HOST", "127.0.0.1" if os.name == "nt" else "0.0.0.0")
-    rtsp_url = f"rtsp://{rtsp_host}:{rtsp_port}/{rtsp_path}"
+    if stream_index > 0:
+        rtsp_path = f"{rtsp_path}{stream_index + 1}"
+    # Always localhost: MediaMTX (started separately, see run_mediamtx_forever)
+    # is what actually listens on 0.0.0.0 for outside connections.
+    publish_url = f"rtsp://127.0.0.1:{rtsp_port}/{rtsp_path}"
 
     if source == "csi":
         # rpicam-vid hardware-encodes H264 directly on the Pi's camera ISP —
@@ -79,8 +139,8 @@ def build_command(device: str | None = None, port_offset: int = 0, source_overri
             ffmpeg_binary(), "-loglevel", "warning",
             "-f", "h264", "-i", "-",
             "-c:v", "copy",
-            "-f", "rtsp", "-rtsp_flags", "listen",
-            rtsp_url,
+            "-f", "rtsp",
+            publish_url,
         ]
         return capture_cmd, ffmpeg_cmd
 
@@ -89,12 +149,16 @@ def build_command(device: str | None = None, port_offset: int = 0, source_overri
         bitrate = env("BITRATE", "2M")
         ffmpeg_cmd = [
             ffmpeg_binary(), "-loglevel", "warning",
-            "-f", "v4l2", "-framerate", framerate, "-video_size", f"{width}x{height}",
+            # MJPEG capture instead of raw: raw YUYV at 720p+ commonly
+            # saturates USB2 bandwidth and gets throttled to a fraction of
+            # the requested framerate by the driver; MJPEG is compressed
+            # on-camera so it fits comfortably.
+            "-f", "v4l2", "-input_format", "mjpeg", "-framerate", framerate, "-video_size", f"{width}x{height}",
             "-i", device,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-pix_fmt", "yuv420p", "-b:v", bitrate, "-g", framerate,
-            "-f", "rtsp", "-rtsp_flags", "listen",
-            rtsp_url,
+            "-f", "rtsp",
+            publish_url,
         ]
         return None, ffmpeg_cmd
 
@@ -104,7 +168,7 @@ def build_command(device: str | None = None, port_offset: int = 0, source_overri
         # some Windows camera drivers cannot be opened in a combined command.
         device = device or env("CAMERA_DEVICE", "Integrated Camera")
         bitrate = env("BITRATE", "2M")
-        udp_port = str(10000 + int(env("RTSP_PORT", "8554")) + port_offset)
+        udp_port = str(10000 + int(env("RTSP_PORT", "8554")) + stream_index)
         capture_cmd = [
             ffmpeg_binary(), "-loglevel", "warning",
             "-f", "dshow", "-video_size", f"{width}x{height}",
@@ -119,7 +183,8 @@ def build_command(device: str | None = None, port_offset: int = 0, source_overri
             ffmpeg_binary(), "-loglevel", "warning",
             "-analyzeduration", "2M", "-probesize", "5M",
             "-f", "mpegts", "-i", f"udp://127.0.0.1:{udp_port}?fifo_size=1000000&overrun_nonfatal=1", "-c:v", "copy",
-            "-f", "rtsp", "-rtsp_flags", "listen", rtsp_url,
+            "-f", "rtsp",
+            publish_url,
         ]
         return capture_cmd, ffmpeg_cmd
 
@@ -155,17 +220,15 @@ def run_auto() -> None:
     processes: list[subprocess.Popen] = []
     try:
         for index, device in enumerate(devices):
-            capture_cmd, ffmpeg_cmd = build_command(device=device, port_offset=index, source_override=source)
+            capture_cmd, ffmpeg_cmd = build_command(device=device, stream_index=index, source_override=source)
             print(f"[camera-node] camera {index + 1}: {device}", flush=True)
             print(f"[camera-node] ffmpeg: {shlex.join(ffmpeg_cmd)}", flush=True)
-            # Start the RTSP listener first, then attach the camera encoder to
-            # its stdin. This avoids a Windows pipe race during startup.
-            ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-            capture_stdout = subprocess.DEVNULL if source == "windows" else ffmpeg_proc.stdin
-            capture_proc = subprocess.Popen(capture_cmd or [], stdout=capture_stdout)
-            if ffmpeg_proc.stdin:
-                ffmpeg_proc.stdin.close()
-            processes.extend([capture_proc, ffmpeg_proc])
+            capture_proc = subprocess.Popen(capture_cmd, stdout=subprocess.PIPE) if capture_cmd else None
+            ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=capture_proc.stdout if capture_proc else None)
+            if capture_proc and capture_proc.stdout:
+                capture_proc.stdout.close()  # let ffmpeg see EOF if capture_proc dies, not just this reference
+                processes.append(capture_proc)
+            processes.append(ffmpeg_proc)
         while any(process.poll() is None for process in processes):
             time.sleep(1)
     finally:
@@ -195,6 +258,9 @@ def run_once() -> int:
 
 
 def main() -> None:
+    threading.Thread(target=run_mediamtx_forever, daemon=True).start()
+    time.sleep(MEDIAMTX_STARTUP_GRACE_SECONDS)  # give it a moment to bind before ffmpeg tries to publish
+
     while True:
         try:
             exit_code = run_once()

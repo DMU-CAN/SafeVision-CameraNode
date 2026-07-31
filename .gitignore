@@ -1,3 +1,11 @@
 .env
 __pycache__/
 *.pyc
+
+# Bundled/downloaded binaries (see README.md for where to get them) and local
+# test artifacts — machine-specific, shouldn't be committed.
+bin/
+ffmpeg/
+mediamtx/
+*.log
+test-webcam.mp4
