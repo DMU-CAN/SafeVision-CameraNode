@@ -154,6 +154,13 @@ def build_command(device: str | None = None, stream_index: int = 0, source_overr
             ffmpeg_binary(), "-loglevel", "warning",
             "-f", "h264", "-i", "-",
             "-c:v", "copy",
+            # TCP instead of ffmpeg's default UDP for the RTSP media transport:
+            # pushing over a WAN/NAT, UDP RTP packets commonly get dropped by
+            # firewalls even though the TCP control connection stays open,
+            # which reads as the publisher "timing out" every ~10s even
+            # though ffmpeg itself never errors. TCP reuses the already-open
+            # control connection for media too, avoiding that path entirely.
+            "-rtsp_transport", "tcp",
             "-f", "rtsp",
             publish_url,
         ]
@@ -172,6 +179,13 @@ def build_command(device: str | None = None, stream_index: int = 0, source_overr
             "-i", device,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-pix_fmt", "yuv420p", "-b:v", bitrate, "-g", framerate,
+            # TCP instead of ffmpeg's default UDP for the RTSP media transport:
+            # pushing over a WAN/NAT, UDP RTP packets commonly get dropped by
+            # firewalls even though the TCP control connection stays open,
+            # which reads as the publisher "timing out" every ~10s even
+            # though ffmpeg itself never errors. TCP reuses the already-open
+            # control connection for media too, avoiding that path entirely.
+            "-rtsp_transport", "tcp",
             "-f", "rtsp",
             publish_url,
         ]
@@ -198,6 +212,13 @@ def build_command(device: str | None = None, stream_index: int = 0, source_overr
             ffmpeg_binary(), "-loglevel", "warning",
             "-analyzeduration", "2M", "-probesize", "5M",
             "-f", "mpegts", "-i", f"udp://127.0.0.1:{udp_port}?fifo_size=1000000&overrun_nonfatal=1", "-c:v", "copy",
+            # TCP instead of ffmpeg's default UDP for the RTSP media transport:
+            # pushing over a WAN/NAT, UDP RTP packets commonly get dropped by
+            # firewalls even though the TCP control connection stays open,
+            # which reads as the publisher "timing out" every ~10s even
+            # though ffmpeg itself never errors. TCP reuses the already-open
+            # control connection for media too, avoiding that path entirely.
+            "-rtsp_transport", "tcp",
             "-f", "rtsp",
             publish_url,
         ]
