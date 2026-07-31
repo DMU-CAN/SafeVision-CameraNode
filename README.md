@@ -82,11 +82,12 @@ inside `camera_node.py`, independent of the capture pipeline.
   MJPEG is compressed on-camera so it fits comfortably (verified: raw YUYV at
   1280x720 capped at ~7.5fps on a Logitech webcam over USB2, MJPEG hit the
   full 30fps at the same resolution).
-- Pushing into a remote MediaMTX instead of a local one (e.g. the main
-  server's own MediaMTX, for a camera on a different network than the
-  backend) is also possible — set `RTSP_PATH`'s target host by publishing
-  directly to that server's address instead of running a local MediaMTX; see
-  `SafeVision-Backend/README.md` §7.1 for that setup.
+- If this node's camera is on a different network than the backend (and its
+  inbound firewall/NAT can't be opened), set `PUBLISH_HOST` (and
+  `PUBLISH_USER`/`PUBLISH_PASS` if needed) in `.env` to push straight into
+  the main server's own MediaMTX instead of running a local one here — see
+  `.env.example` and `SafeVision-Backend/README.md` §7.1. This node then
+  only needs outbound access to `PUBLISH_HOST`, no inbound port at all.
 
 # Windows laptop webcam test mode
 

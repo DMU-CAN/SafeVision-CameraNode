@@ -97,16 +97,37 @@ def run_mediamtx_forever() -> None:
         time.sleep(RESTART_BACKOFF_SECONDS)
 
 
+def publish_target(stream_index: int) -> str:
+    """Where ffmpeg pushes to. Defaults to this node's own local MediaMTX
+    (127.0.0.1) — started separately, see run_mediamtx_forever — which is
+    right when the backend can reach this node's RTSP port directly.
+
+    If the camera and backend are on different networks/firewalls, set
+    PUBLISH_HOST (and PUBLISH_USER/PUBLISH_PASS if the target requires auth,
+    e.g. the main backend's own MediaMTX, see SafeVision-Backend README
+    §7.1) to push straight to that remote server instead — this node then
+    needs no inbound port open at all, only outbound to PUBLISH_HOST."""
+    rtsp_port = env("RTSP_PORT", "8554")
+    rtsp_path = env("RTSP_PATH", "cam")
+    if stream_index > 0:
+        rtsp_path = f"{rtsp_path}{stream_index + 1}"
+
+    host = env("PUBLISH_HOST", f"127.0.0.1:{rtsp_port}")
+    user = os.environ.get("PUBLISH_USER")
+    password = os.environ.get("PUBLISH_PASS")
+    auth = f"{user}:{password}@" if user else ""
+    return f"rtsp://{auth}{host}/{rtsp_path}"
+
+
 def build_command(device: str | None = None, stream_index: int = 0, source_override: str | None = None) -> tuple[list[str] | None, list[str]]:
     """Returns (capture_command_or_None, ffmpeg_command). When capture_command
     is set, its stdout must be piped into ffmpeg's stdin (used for CSI). The
-    ffmpeg command always publishes (pushes) to the local MediaMTX instance —
-    it never hosts RTSP itself.
+    ffmpeg command always publishes (pushes) — it never hosts RTSP itself.
+    See publish_target() for where it pushes to.
 
     `stream_index` distinguishes multiple cameras on the same node (see
-    run_auto): MediaMTX serves any number of streams on one shared port, each
-    at its own path, so the second+ camera gets RTSP_PATH suffixed with its
-    1-based index (cam, cam2, cam3, ...) rather than a different port."""
+    run_auto): the second+ camera gets RTSP_PATH suffixed with its 1-based
+    index (cam, cam2, cam3, ...) rather than a different port."""
 
     source = (source_override or env("CAMERA_SOURCE", "auto")).lower()
     if source in {"auto", "windows_auto"} and os.name == "nt":
@@ -114,13 +135,7 @@ def build_command(device: str | None = None, stream_index: int = 0, source_overr
     width = env("WIDTH", "1280")
     height = env("HEIGHT", "720")
     framerate = env("FRAMERATE", "30")
-    rtsp_port = env("RTSP_PORT", "8554")
-    rtsp_path = env("RTSP_PATH", "cam")
-    if stream_index > 0:
-        rtsp_path = f"{rtsp_path}{stream_index + 1}"
-    # Always localhost: MediaMTX (started separately, see run_mediamtx_forever)
-    # is what actually listens on 0.0.0.0 for outside connections.
-    publish_url = f"rtsp://127.0.0.1:{rtsp_port}/{rtsp_path}"
+    publish_url = publish_target(stream_index)
 
     if source == "csi":
         # rpicam-vid hardware-encodes H264 directly on the Pi's camera ISP —
@@ -258,8 +273,13 @@ def run_once() -> int:
 
 
 def main() -> None:
-    threading.Thread(target=run_mediamtx_forever, daemon=True).start()
-    time.sleep(MEDIAMTX_STARTUP_GRACE_SECONDS)  # give it a moment to bind before ffmpeg tries to publish
+    if os.environ.get("PUBLISH_HOST"):
+        # Pushing straight to a remote MediaMTX (see publish_target) — this
+        # node doesn't need its own RTSP server at all.
+        print(f"[camera-node] PUBLISH_HOST set, pushing directly to {os.environ['PUBLISH_HOST']} (no local mediamtx)", flush=True)
+    else:
+        threading.Thread(target=run_mediamtx_forever, daemon=True).start()
+        time.sleep(MEDIAMTX_STARTUP_GRACE_SECONDS)  # give it a moment to bind before ffmpeg tries to publish
 
     while True:
         try:
