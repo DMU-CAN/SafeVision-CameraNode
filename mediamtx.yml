@@ -1,0 +1,6 @@
+# Minimal MediaMTX config for a camera-node's local instance. No auth needed —
+# ffmpeg only ever publishes to it over localhost, and the only thing reading
+# from it remotely is the trusted main backend. "all_others" lets ffmpeg
+# publish to any path (cam, cam2, cam3, ...) without pre-declaring each one.
+paths:
+  all_others:

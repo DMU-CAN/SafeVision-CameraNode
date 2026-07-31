@@ -32,8 +32,10 @@ connection listen mode didn't.)
   `mediamtx_v1.19.3_linux_arm64.tar.gz` for a Raspberry Pi). Extract it to
   `mediamtx/mediamtx` (or `mediamtx/mediamtx.exe` on Windows) next to
   `camera_node.py`, or point `MEDIAMTX_PATH` at it, or just have `mediamtx`
-  on `PATH`. No config file is needed — defaults are fine for a LAN camera
-  node (RTSP on port 8554, no auth).
+  on `PATH`. The repo's `mediamtx.yml` (same directory as `camera_node.py`)
+  is picked up automatically — without it MediaMTX starts with an empty
+  config and refuses to let ffmpeg publish at all (`path 'cam' is not
+  configured`), so don't delete it.
 - Python 3.9+
 
 ## Setup
@@ -59,7 +61,7 @@ curl -X POST http://<backend-ip>:8080/api/v1/cameras \
 
 ```bash
 sudo mkdir -p /opt/safevision-camera-node
-sudo cp -r camera_node.py .env mediamtx/ /opt/safevision-camera-node/
+sudo cp -r camera_node.py .env mediamtx.yml mediamtx/ /opt/safevision-camera-node/
 sudo cp camera-node.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now camera-node
